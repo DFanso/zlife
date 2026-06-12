@@ -24,7 +24,11 @@ pub const Cell = enum(u1) {
     }
 };
 
-/// A wrapping rectangular grid of cells plus the machinery to evolve it.
+/// A rectangular grid of cells plus the machinery to evolve it.
+///
+/// By default the grid is a torus: neighbor lookups wrap around the edges. Set
+/// `wrap = false` for a bounded grid where everything past an edge counts as
+/// permanently dead, so spaceships can sail off and disappear.
 pub const Board = struct {
     width: usize,
     height: usize,
@@ -34,6 +38,8 @@ pub const Board = struct {
     scratch: []Cell,
     allocator: Allocator,
     generation: u64 = 0,
+    /// When true the grid wraps (torus); when false edges are hard walls.
+    wrap: bool = true,
 
     /// Allocate an all-dead board of `width` x `height` cells.
     pub fn init(allocator: Allocator, width: usize, height: usize) Allocator.Error!Board {
@@ -89,7 +95,9 @@ pub const Board = struct {
         return count;
     }
 
-    /// Count living cells in the 8-neighborhood of `(x, y)`, wrapping at edges.
+    /// Count living cells in the 8-neighborhood of `(x, y)`. Neighbors wrap
+    /// around the edges on a torus (`wrap == true`) or are treated as dead on a
+    /// bounded grid (`wrap == false`).
     pub fn liveNeighbors(self: Board, x: usize, y: usize) u8 {
         var count: u8 = 0;
         var dy: i8 = -1;
@@ -97,12 +105,25 @@ pub const Board = struct {
             var dx: i8 = -1;
             while (dx <= 1) : (dx += 1) {
                 if (dx == 0 and dy == 0) continue;
-                const nx = wrap(x, dx, self.width);
-                const ny = wrap(y, dy, self.height);
-                if (self.get(nx, ny).isAlive()) count += 1;
+                if (self.neighborAlive(x, y, dx, dy)) count += 1;
             }
         }
         return count;
+    }
+
+    /// Is the neighbor at offset `(dx, dy)` from `(x, y)` alive? Honors the
+    /// board's `wrap` setting; off-grid cells on a bounded board read as dead.
+    fn neighborAlive(self: Board, x: usize, y: usize, dx: i8, dy: i8) bool {
+        if (self.wrap) {
+            return self.get(wrap(x, dx, self.width), wrap(y, dy, self.height)).isAlive();
+        }
+        const sx = @as(isize, @intCast(x)) + dx;
+        const sy = @as(isize, @intCast(y)) + dy;
+        if (sx < 0 or sy < 0) return false;
+        const nx: usize = @intCast(sx);
+        const ny: usize = @intCast(sy);
+        if (nx >= self.width or ny >= self.height) return false;
+        return self.get(nx, ny).isAlive();
     }
 
     /// Advance the board by one generation and return the new population.
@@ -347,6 +368,40 @@ test "neighbors wrap around the torus" {
     b.set(0, 0, .alive);
     try testing.expectEqual(@as(u8, 1), b.liveNeighbors(0, 0));
     try testing.expectEqual(@as(u8, 1), b.liveNeighbors(2, 2));
+}
+
+test "bounded grid does not wrap neighbors" {
+    var b = try Board.init(testing.allocator, 3, 3);
+    defer b.deinit();
+    b.wrap = false;
+    // Opposite corners are NOT adjacent when edges are walls.
+    b.set(2, 2, .alive);
+    b.set(0, 0, .alive);
+    try testing.expectEqual(@as(u8, 0), b.liveNeighbors(0, 0));
+    try testing.expectEqual(@as(u8, 0), b.liveNeighbors(2, 2));
+}
+
+test "glider crashing into a wall stops gliding" {
+    var b = try Board.init(testing.allocator, 8, 8);
+    defer b.deinit();
+    b.wrap = false;
+    // A glider travels down-and-right; on a torus it would glide forever, but
+    // here it collides with the bottom-right walls and settles into debris.
+    b.stamp(4, 4, patterns.glider);
+    try testing.expectEqual(@as(usize, 5), b.population());
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) _ = b.step();
+
+    // What's left is a stable still life (a 4-cell block), not a moving glider:
+    // stepping further no longer changes the population.
+    const settled = b.population();
+    try testing.expectEqual(@as(usize, 4), settled);
+    i = 0;
+    while (i < 5) : (i += 1) {
+        _ = b.step();
+        try testing.expectEqual(settled, b.population());
+    }
 }
 
 test "pulsar has 48 cells and period 3" {

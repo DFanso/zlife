@@ -21,6 +21,8 @@ const Options = struct {
     seed: ?u64 = null,
     alive: u8 = 'O',
     dead: u8 = ' ',
+    /// Use hard walls instead of the default wrap-around (torus) edges.
+    walls: bool = false,
 };
 
 const usage =
@@ -39,6 +41,8 @@ const usage =
     \\      --seed N         seed the random soup for reproducible runs
     \\      --alive C        glyph for living cells (default: 'O')
     \\      --dead C         glyph for dead cells   (default: ' ')
+    \\      --walls          bound the grid with walls instead of wrapping it;
+    \\                       lets gliders fly off-screen (e.g. for --pattern gun)
     \\  -h, --help           show this help and exit
     \\
 ;
@@ -96,6 +100,8 @@ fn parseArgs(args: []const [:0]u8) ParseError!Options {
             opts.alive = try parseGlyph(try nextValue(args, &i));
         } else if (match(arg, null, "--dead")) {
             opts.dead = try parseGlyph(try nextValue(args, &i));
+        } else if (match(arg, null, "--walls")) {
+            opts.walls = true;
         } else {
             return error.UnknownFlag;
         }
@@ -141,6 +147,7 @@ fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     var board = try zlife.Board.init(allocator, opts.width, opts.height);
     defer board.deinit();
+    board.wrap = !opts.walls;
 
     seedBoard(&board, opts);
 
@@ -160,8 +167,11 @@ fn run(allocator: std.mem.Allocator, opts: Options) !void {
     while (opts.gens == 0 or gen < opts.gens) : (gen += 1) {
         try out.writeAll("\x1b[H"); // cursor home
         try out.print(
-            "zlife  \x1b[1m{s}\x1b[0m  gen {d}  pop {d}  {d}x{d}\x1b[K\n",
-            .{ opts.pattern, board.generation, board.population(), board.width, board.height },
+            "zlife  \x1b[1m{s}\x1b[0m  gen {d}  pop {d}  {d}x{d}  {s}\x1b[K\n",
+            .{
+                opts.pattern, board.generation, board.population(),
+                board.width,  board.height,     if (board.wrap) "torus" else "walls",
+            },
         );
         try board.render(out, opts.alive, opts.dead);
         try out.flush();
@@ -221,6 +231,16 @@ test "parseArgs reads flags" {
     try std.testing.expectEqualStrings("gun", opts.pattern);
     try std.testing.expectEqual(@as(usize, 60), opts.width);
     try std.testing.expectEqual(@as(?u64, 7), opts.seed);
+    try std.testing.expect(!opts.walls); // defaults to a torus
+}
+
+test "parseArgs reads the --walls flag" {
+    const a = std.testing.allocator;
+    const argv = try makeArgv(a, &.{ "zlife", "--walls" });
+    defer freeArgv(a, argv);
+
+    const opts = try parseArgs(argv);
+    try std.testing.expect(opts.walls);
 }
 
 test "parseArgs rejects unknown flags" {
